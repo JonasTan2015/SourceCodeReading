@@ -1,0 +1,177 @@
+### Java ThreadPoolExecutor Source Code Explaination
+
+Here is how we retrieve a ThreadPoolExecutor.
+
+```Java
+public static ExecutorService newFixedThreadPool(int nThreads) {  
+        return new ThreadPoolExecutor(nThreads, nThreads,  
+                                      0L, TimeUnit.MILLISECONDS,  
+                                      new LinkedBlockingQueue<Runnable>());  
+}  
+```
+
+##Let's take a look at the constructor of ThreadPoolExecutor
+
+```
+public ThreadPoolExecutor(int corePoolSize,  
+                           int maximumPoolSize,  
+                           long keepAliveTime,  
+                           TimeUnit unit,  
+                           BlockingQueue<Runnable> workQueue,  
+                           ThreadFactory threadFactory,  
+                           RejectedExecutionHandler handler) {  
+     if (corePoolSize < 0 ||  
+         maximumPoolSize <= 0 ||  
+         maximumPoolSize < corePoolSize ||  
+         keepAliveTime < 0)  
+         throw new IllegalArgumentException();  
+     if (workQueue == null || threadFactory == null || handler == null)  
+         throw new NullPointerException();  
+     this.corePoolSize = corePoolSize;  
+     this.maximumPoolSize = maximumPoolSize;  
+     this.workQueue = workQueue;  
+     this.keepAliveTime = unit.toNanos(keepAliveTime);  
+     this.threadFactory = threadFactory;  
+     this.handler = handler;  
+ }  
+
+```
+**Parameters**
+
+-**corePoolSize**：poolSize of running threads. When incoming tasks exceeds corePoolSize, they would be stored in workQueue
+
+-**maximumPoolSize**：Mostly left as default. With too many incoming tasks, extra threads (> corePoolSize) could be created. But total number of threads shall not exceed maximumPoolSize.
+
+-**workQueue**: Waiting task queue, an instance of BlockQueue. When tasks exceeds corePoolSize, they shall be stored in this wait list until accepted by a idle thread.
+
+-**keepAliveTime**：Default as 0. Threads stay idling over keepAliveTime shall be terminated.
+
+-**cachedPoolSize**: Default as 60. Mostly leave it as default
+
+-**threadFactory**: Thread generator. You could define customized thread factory.
+
+-**handler**：Incoming tasks exceeding maximumPoolSize would be rejected. This is the handler when a task is rejected. Java provides 5 handlers. You could define your own as following. 
+```
+class MyHandler implements RejectedExecutionHandler{
+	public void rejectedExecution(Runnabler, ThreadPoolExecutor e){
+		// Your handler logic
+	}
+}
+```
+**There are 4 Aborting Policies.**
+-CallerRunsPolicy：If thread pool is still running, run the task under client thread directly. This thread would not be added into thread pool.
+-DiscardOldestPolicy: Disregard the oldest task in workQueue. Insert current task into workQueue.
+-DiscardPolicy: Disregard a task silently
+-AbortPolicy: Default policy in Java. Throws a RejectedExecutionException
+
+## Execute() function
+Here is how we execute a thread in a thread pool.
+```
+ExecutorService executor = Executors.newFixedThreadPool(5);
+executor.execute(new Runnable(){
+	public void run(){}
+});
+```
+Here is the source code of execute()
+```
+public void execute(Runnable command) {  
+    if (command == null)  
+        throw new NullPointerException();  
+    if (poolSize >= corePoolSize || !addIfUnderCorePoolSize(command)) {  
+        if (runState == RUNNING && workQueue.offer(command)) {  
+            if (runState != RUNNING || poolSize == 0)  
+                ensureQueuedTaskHandled(command);  
+        }  
+        else if (!addIfUnderMaximumPoolSize(command))  
+            reject(command); // is shutdown or saturated  
+    }  
+}  
+```
+We could only tell this function decides whether to accept a task or to reject it. 
+**addIfUnderCorePoolSize(command)**: When running threads in thread pool is within CorePoolSize, generate a new thread to run this task.
+**workQueue.offer(command)**: When running threads reach CorePoolSize, push the task into workQueue.
+** ensureQueuedTaskHandled(command)**: As long as a task is accepted, even if thread pool is closed on client side, it ensures all the remaining task would be executed.
+
+## addIfUnderCorePoolSize(Runnable firstTask)
+```
+private boolean addIfUnderCorePoolSize(Runnable firstTask) {  
+    Thread t = null;  
+    final ReentrantLock mainLock = this.mainLock;  
+    mainLock.lock();  
+    try {  
+        if (poolSize < corePoolSize && runState == RUNNING)  
+            t = addThread(firstTask);  
+    } finally {  
+        mainLock.unlock();  
+    }  
+    if (t == null)  
+        return false;  
+    t.start();  
+    return true;  
+}  
+```
+When poolSize < corePoolSize, a new thread would be created for this task. But how would a idle thread look like in thread pool? Let's take a look at addThread(firstTask).
+```
+private Thread addThread(Runnable firstTask) {  
+    Worker w = new Worker(firstTask);  
+    Thread t = threadFactory.newThread(w);  
+    if (t != null) {  
+        w.thread = t;  
+        workers.add(w);  
+        int nt = ++poolSize;  
+        if (nt > largestPoolSize)  
+            largestPoolSize = nt;  
+    }  
+    return t;  
+}  
+```
+
+
+**Worker is merely a runnable. It is a wrapper for firstTask. Now take a look at the run() in Worker class**
+
+```
+public void run() {  
+     try {  
+         Runnable task = firstTask;  
+         firstTask = null;  
+         while (task != null || (task = getTask()) != null) {  
+             runTask(task);  
+             task = null;  
+         }  
+     } finally {  
+         workerDone(this);  
+     }  
+ }  
+```
+After the firstTask is finished, it looks into workQueue to take a new task. What if there no more tasks in workQueue, how would the worker stop running? This is how a worker get a new task.
+
+```
+Runnable getTask() {  
+   for (;;) {  
+       try {  
+           int state = runState;  
+           if (state > SHUTDOWN)  
+               return null;  
+           Runnable r;  
+           if (state == SHUTDOWN)  // Help drain queue  
+               r = workQueue.poll();  
+           else if (poolSize > corePoolSize || allowCoreThreadTimeOut)  
+               r = workQueue.poll(keepAliveTime, TimeUnit.NANOSECONDS);  
+           else  
+               r = workQueue.take();  
+           if (r != null)  
+               return r;  
+           if (workerCanExit()) {  
+               if (runState >= SHUTDOWN) // Wake up others  
+                   interruptIdleWorkers();  
+               return null;  
+           }  
+           // Else retry  
+       } catch (InterruptedException ie) {  
+           // On interruption, re-check runState  
+       }  
+   }  
+```
+AllowCoreThreadTimeOut is mostly set to true. BlockingQueue.poll(long timeout, TimeUnit unit) => When no task in workQueue, the thread would be blocked for at most timeout. If it still does not get a task, the worker would exit the while loop and terminate itself.
+
+Of course, when AllowedCoreThreadTimeOut is set to true, the worker stays idling and cannot be terminated by executor.close().
